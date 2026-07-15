@@ -1,0 +1,153 @@
+import subprocess
+import os
+import re
+from flask import Flask, render_template_string, request, redirect, url_for
+
+app = Flask(__name__)
+
+# HTML template for the web interface
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Custom Firewall Manager</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        h1 { color: #333; }
+        form { margin-bottom: 20px; }
+        input, button { padding: 8px; margin: 5px; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+    </style>
+</head>
+<body>
+    <h1>Custom Firewall Manager</h1>
+    
+    <h2>Add Packet Filtering Rule</h2>
+    <form method="POST" action="/add_rule">
+        Protocol: <input type="text" name="protocol" placeholder="tcp/udp/icmp" required><br>
+ Source IP: <input type="text" name="src_ip" placeholder="e.g., 192.168.1.0/24"><br>
+        Destination IP: <input type="text" name="dst_ip" placeholder="e.g., 10.0.0.1"><br>
+        Source Port: <input type="text" name="src_port"><br>
+        Destination Port: <input type="text" name="dst_port"><br>
+        Action: <select name="action"><option value="ACCEPT">ACCEPT</option><option value="DROP">DROP</option><option value="REJECT">REJECT</option></select><br>
+        <button type="submit">Add Rule</button>
+    </form>
+    
+    <h2>Enable/Disable NAT</h2>
+    <form method="POST" action="/toggle_nat">
+        <button type="submit" name="enable" value="1">Enable NAT</button>
+        <button type="submit" name="disable" value="1">Disable NAT</button>
+    </form>
+    
+    <h2>Current Rules</h2>
+    <table>
+        <tr><th>Chain</th><th>Rule</th><th>Action</th></tr>
+        {% for rule in rules %}
+        <tr><td>{{ rule[0] }}</td><td>{{ rule[1] }}</td><td><a href="/delete_rule/{{ rule[2] }}">Delete</a></td></tr>
+        {% endfor %}
+    </table>
+    
+    <h2>Logs</h2>
+    <pre>{{ logs }}</pre>
+    
+    <h2>Monitoring (Packet Counts)</h2>
+    <pre>{{ monitoring }}</pre>
+</body>
+</html>
+"""
+
+def run_command(cmd):
+    """Run a shell command and return output."""
+    try:
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)
+        return result.stdout
+    except subprocess.CalledProcessError as e:
+        return f"Error: {e.stderr}"
+
+def get_rules():
+    """Get current iptables rules."""
+    output = run_command("sudo iptables -L -n --line-numbers")
+    rules = []
+    for line in output.split('\n'):
+        if re.match(r'^\d+', line):
+            parts = line.split()
+            if len(parts) > 2:
+                chain = parts[0] if parts[0].isdigit() else "INPUT"  # Assuming INPUT chain
+                rule = ' '.join(parts[1:])
+                rules.append((chain, rule, parts[0]))
+    return rules
+
+def add_rule(protocol, src_ip, dst_ip, src_port, dst_port, action):
+    """Add a packet filtering rule."""
+    cmd = f"sudo iptables -A INPUT -p {protocol}"
+    if src_ip:
+        cmd += f" -s {src_ip}"
+    if dst_ip:
+ cmd += f" -d {dst_ip}"
+    if src_port:
+        cmd += f" --sport {src_port}"
+    if dst_port:
+        cmd += f" --dport {dst_port}"
+    cmd += f" -j {action}"
+    run_command(cmd)
+
+def delete_rule(line_num):
+    """Delete a rule by line number."""
+    run_command(f"sudo iptables -D INPUT {line_num}")
+
+def toggle_nat(enable):
+    """Enable or disable NAT."""
+    if enable:
+        run_command("sudo sysctl -w net.ipv4.ip_forward=1")
+        run_command("sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE")  # Assuming eth0 is the outgoing interface
+    else:
+        run_command("sudo sysctl -w net.ipv4.ip_forward=0")
+        run_command("sudo iptables -t nat -F POSTROUTING")
+
+def get_logs():
+    """Get recent firewall logs from kernel journal (Kali Linux)."""
+    return run_command("sudo journalctl -k -n 20 | grep Firewall")
+
+
+def get_monitoring():
+    """Get packet counts."""
+    return run_command("sudo iptables -L -n -v")
+@app.route('/')
+def index():
+    rules = get_rules()
+    logs = get_logs()
+    monitoring = get_monitoring()
+    return render_template_string(HTML_TEMPLATE, rules=rules, logs=logs, monitoring=monitoring)
+
+@app.route('/add_rule', methods=['POST'])
+def add_rule_route():
+    protocol = request.form['protocol']
+    src_ip = request.form.get('src_ip', '')
+    dst_ip = request.form.get('dst_ip', '')
+    src_port = request.form.get('src_port', '')
+    dst_port = request.form.get('dst_port', '')
+    action = request.form['action']
+    add_rule(protocol, src_ip, dst_ip, src_port, dst_port, action)
+    return redirect(url_for('index'))
+
+@app.route('/delete_rule/<int:line_num>')
+def delete_rule_route(line_num):
+    delete_rule(line_num)
+    return redirect(url_for('index'))
+
+@app.route('/toggle_nat', methods=['POST'])
+def toggle_nat_route():
+    if 'enable' in request.form:
+        toggle_nat(True)
+    elif 'disable' in request.form:
+        toggle_nat(False)
+    return redirect(url_for('index'))
+
+if __name__ == '__main__':
+    # Ensure iptables is available and set basic stateful rules
+    run_command("sudo iptables -F")  # Flush existing rules
+    run_command("sudo iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT")  # Stateful rule
+    run_command("sudo iptables -A INPUT -j LOG --log-prefix 'Firewall: '")  # Logging
+    app.run(host='0.0.0.0', port=5000, debug=False)

@@ -1,0 +1,92 @@
+#!/bin/bash
+# Custom Firewall Script for Kali VM
+# Features: Packet filtering, Stateful rules, NAT, Logging
+# Final Version: Compatible with Python Web Dashboard (pfSense-like)
+
+echo "[+] Applying custom firewall..."
+
+# -------------------------------
+# 0. Variables
+# -------------------------------
+LAN_SUBNET="192.168.56.0/24"   # Adjust to your Host-Only LAN subnet
+LAN_IF="eth1"                  # Change to your LAN interface (check with ip a)
+WAN_IF=$(ip route | grep default | awk '{print $5}')  # Auto-detect WAN interface
+
+# -------------------------------
+# 1. Flush existing rules
+# -------------------------------
+iptables -F
+iptables -X
+iptables -t nat -F
+iptables -t nat -X
+iptables -t mangle -F
+iptables -t mangle -X
+
+# -------------------------------
+# 2. Default policies
+# -------------------------------
+iptables -P INPUT DROP
+iptables -P FORWARD DROP
+iptables -P OUTPUT ACCEPT
+
+# -------------------------------
+# 3. Allow loopback
+# -------------------------------
+iptables -A INPUT -i lo -j ACCEPT
+
+# -------------------------------
+# 4. Stateful rules
+# -------------------------------
+iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+# -------------------------------
+# 5. Allow LAN traffic & ICMP
+# -------------------------------
+iptables -A INPUT -s $LAN_SUBNET -j ACCEPT
+iptables -A INPUT -p icmp -s $LAN_SUBNET -j ACCEPT
+iptables -A FORWARD -s $LAN_SUBNET -j ACCEPT
+
+# -------------------------------
+# 6. Allow SSH and Python Web UI
+# -------------------------------
+iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+iptables -A INPUT -p tcp --dport 5000 -j ACCEPT
+
+# -------------------------------
+# 7. NAT & Forwarding
+# -------------------------------
+# Enable IP forwarding
+echo 1 > /proc/sys/net/ipv4/ip_forward
+
+# NAT for LAN → WAN
+iptables -t nat -A POSTROUTING -s $LAN_SUBNET -o $WAN_IF -j MASQUERADE
+
+# Forward traffic
+iptables -A FORWARD -i $LAN_IF -o $WAN_IF -j ACCEPT
+iptables -A FORWARD -i $WAN_IF -o $LAN_IF -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+# -------------------------------
+# 8. Logging (limited)
+# -------------------------------
+iptables -A INPUT -m limit --limit 5/min -j LOG \
+  --log-prefix "FW-INPUT-DROP: " --log-level 4
+iptables -A FORWARD -m limit --limit 5/min -j LOG \
+  --log-prefix "FW-FORWARD-DROP: " --log-level 4
+
+# -------------------------------
+# 9. Explicit drop (last rule)
+# -------------------------------
+iptables -A INPUT -j DROP
+iptables -A FORWARD -j DROP
+
+# -------------------------------
+# 10. Save rules for persistence
+# -------------------------------
+mkdir -p /etc/iptables
+iptables-save > /etc/iptables/rules.v4
+systemctl enable netfilter-persistent
+
+echo "✅ Custom Firewall Applied Successfully!"
+echo "📄 Logs: sudo tail -f /var/log/kern.log"
+echo "🌐 Web UI: http://<Kali-IP>:5000 (run python3 web_ui.py)"
