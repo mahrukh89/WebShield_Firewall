@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.log
+logs/*.log
+config/rules.conf.bak
+.DS_Store
